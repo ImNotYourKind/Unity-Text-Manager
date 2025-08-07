@@ -1,5 +1,7 @@
 # Unity Text Manager v2.0 - Corrections et Améliorations
 
+ACTUELLEMENT EN PANNE
+
 Il s'agit d'un script Python complet pour une application graphique (utilisant Tkinter) appelée "Unity Text Manager". 
 Voici un résumé de ses fonctionnalités principales :
 
