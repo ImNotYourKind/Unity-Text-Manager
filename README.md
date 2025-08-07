@@ -1,5 +1,17 @@
 # Unity Text Manager v2.0 - Corrections et Améliorations
 
+Il s'agit d'un script Python complet pour une application graphique (utilisant Tkinter) appelée "Unity Text Manager". 
+Voici un résumé de ses fonctionnalités principales :
+
+- Il peut scanner un dossier de jeu Unity à la recherche de fichiers contenant du texte, notamment des TextAsset, MonoBehaviour (en explorant leur structure pour trouver des champs texte), et des fichiers texte bruts (.json, .xml, .txt). Il utilise la bibliothèque UnityPy pour lire les fichiers Unity.
+- Il extrait les textes trouvés, les stocke dans une structure de données (liste de dictionnaires) avec des métadonnées (nom du fichier source, type d'asset, chemin, texte original, etc.).
+- Il permet de visualiser les textes extraits dans une interface.
+- Il offre la possibilité d'exporter ces textes vers un fichier JSON pour traduction externe, et d'importer les traductions modifiées depuis un fichier JSON.
+- Il intègre un système de traduction automatique utilisant l'API OpenAI, avec une détection de langue (via langdetect si disponible, sinon basique) pour éviter de traduire ce qui est déjà en français.
+- Il inclut un mécanisme de cache pour les traductions.
+ -Il peut réinjecter les textes traduits dans les fichiers Unity d'origine, en utilisant à nouveau UnityPy. Avant toute modification, il crée une sauvegarde des fichiers dans un dossier backups.
+- L'interface est divisée en onglets (Scanner, Éditeur, Injection) pour guider l'utilisateur à travers le processus. Elle inclut des barres de progression, des logs, et des contrôles pour chaque étape.
+
 ## 🎯 Résumé des corrections apportées
 
 ## 🔥 Problèmes critiques corrigés
