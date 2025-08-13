@@ -280,16 +280,17 @@ class UnityTextInjector:
     def _verify_unity_file_integrity(self, file_path: Path) -> bool:
         """Vérifie que le fichier Unity peut être chargé sans erreur"""
         try:
-            env = UnityPy.load(str(file_path))
-            readable_objects = 0
+            with open(file_path, "rb") as f:
+                env = UnityPy.load(f)
+                readable_objects = 0
+                
+                for obj in env.objects:
+                    try:
+                        _ = obj.read()
+                        readable_objects += 1
+                    except:
+                        continue
             
-            for obj in env.objects:
-                try:
-                    _ = obj.read()
-                    readable_objects += 1
-                except:
-                    continue
-                    
             print(f"   🔍 Vérification intégrité: {readable_objects} objets lisibles")
             return readable_objects > 0
             
