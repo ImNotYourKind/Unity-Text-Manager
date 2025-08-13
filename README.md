@@ -1,6 +1,6 @@
 # Unity Text Manager v2.0 - Corrections et Améliorations
 
-ACTUELLEMENT EN PANNE
+## A fonctionné pour un jeu. Il a bien extrait les bons fichiers, les a traduit automatiquement et les a réinjecté sans problème. Maintenant il y a encore pleins d'améliorations à faire. La traduction n'est pas terrible et il faut tester l'appli sur d'autres jeux. Ajouter également des fonctionnalités qui facilite le parcours utilisateur.
 
 Il s'agit d'un script Python complet pour une application graphique (utilisant Tkinter) appelée "Unity Text Manager". 
 Voici un résumé de ses fonctionnalités principales :
