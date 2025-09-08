@@ -22,12 +22,18 @@ from tkinter import ttk
 from datetime import datetime
 from typing import Optional, Dict, List
 
-# Importer les modules créés
+# Marquer openai_translator comme non disponible (remplacé par intelligent_translator)
+OPENAI_AVAILABLE = False
+
+# Importer le traducteur intelligent
 try:
-    from openai_translator import OpenAITranslator, OPENAI_AVAILABLE
+    from intelligent_translator_adapter import IntelligentTranslatorAdapter
+    INTELLIGENT_TRANSLATOR_AVAILABLE = True
+    print("✅ Traducteur intelligent disponible")
 except ImportError as e:
-    print(f"Erreur lors de l'import de openai_translator: {e}")
-    OPENAI_AVAILABLE = False
+    print(f"Erreur lors de l'import du traducteur intelligent: {e}")
+    INTELLIGENT_TRANSLATOR_AVAILABLE = False
+    IntelligentTranslatorAdapter = None
 
 try:
     from unity_scanner import UnityTextScanner
@@ -81,8 +87,12 @@ class UnityTextManagerGUI:
         self.translating = False
         self.stop_translation = False
         
-        # Système de traduction
-        self.translator: Optional[OpenAITranslator] = None
+        # Variables de configuration
+        self.confirm_actions_var = tk.BooleanVar(value=True)  # Demander confirmation par défaut
+        self.auto_save_var = tk.BooleanVar(value=False)  # Auto-sauvegarde désactivée par défaut
+        
+        # Système de traduction intelligent
+        self.intelligent_translator: Optional[IntelligentTranslatorAdapter] = None
         
         # Configuration interface
         self.setup_styles()
@@ -93,22 +103,23 @@ class UnityTextManagerGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def setup_styles(self):
-        """Configure les styles avancés de l'interface"""
+        """Configure les styles personnalisés"""
         style = ttk.Style()
         
-        # Utiliser un thème moderne
-        available_themes = style.theme_names()
-        if 'clam' in available_themes:
-            style.theme_use('clam')
-        elif 'alt' in available_themes:
-            style.theme_use('alt')
+        # Style pour le titre
+        style.configure('Title.TLabel', font=('Arial', 16, 'bold'))
         
-        # Styles personnalisés
-        style.configure('Title.TLabel', font=('Arial', 12, 'bold'))
-        style.configure('Action.TButton', font=('Arial', 10, 'bold'), padding=6)
-        style.configure('Success.TButton', background='#4CAF50', foreground='white')
-        style.configure('Warning.TButton', background='#FF9800', foreground='white')
-        style.configure('Danger.TButton', background='#F44336', foreground='white')
+        # Style pour les boutons d'action
+        style.configure('Action.TButton', font=('Arial', 10, 'bold'))
+        
+        # Style pour les boutons de danger
+        style.configure('Danger.TButton', foreground='red')
+        
+        # Style pour les boutons d'avertissement
+        style.configure('Warning.TButton', foreground='orange')
+        
+        # Style pour la barre de progression
+        style.configure('Custom.Horizontal.TProgressbar', thickness=20)
         
         # Style pour le Treeview
         style.configure('Treeview', font=('Arial', 9))
@@ -131,7 +142,6 @@ class UnityTextManagerGUI:
         self.create_scanner_tab()
         self.create_editor_tab()
         self.create_injection_tab()
-        self.create_settings_tab()
         
         # Frame pour les logs (en bas)
         self.create_log_section(main_frame)
@@ -185,8 +195,14 @@ class UnityTextManagerGUI:
         
         ttk.Button(
             path_frame, 
-            text="📂 Parcourir", 
+            text="📂 Parcourir dossier", 
             command=self.browse_folder
+        ).pack(side=tk.RIGHT, padx=(5, 0))
+        
+        ttk.Button(
+            path_frame, 
+            text="📄 Sélectionner fichier", 
+            command=self.browse_file
         ).pack(side=tk.RIGHT)
         
         # Section options de scan
@@ -230,6 +246,14 @@ class UnityTextManagerGUI:
             control_section,
             text="📂 Charger un scan existant",
             command=self.load_scan
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Bouton de décryptage XOR manuel
+        ttk.Button(
+            control_section,
+            text="🔓 Décryptage XOR",
+            command=self.start_manual_xor_decrypt,
+            style='Warning.TButton'
         ).pack(side=tk.LEFT)
         
         # Bouton d'arrêt (initialement caché)
@@ -285,20 +309,20 @@ class UnityTextManagerGUI:
         ).pack(side=tk.LEFT, padx=(0, 5))
         
         # Traduction automatique avec indicateur de disponibilité
-        if OPENAI_AVAILABLE:
+        if INTELLIGENT_TRANSLATOR_AVAILABLE:
             self.auto_translate_button = ttk.Button(
                 left_tools,
-                text="🤖 Traduction auto",
-                command=self.setup_auto_translation,
+                text="🧠 Traduction intelligente",
+                command=self.setup_intelligent_translation,
                 style='Success.TButton'
             )
         else:
             self.auto_translate_button = ttk.Button(
                 left_tools,
                 text="🤖 Traduction auto (non disponible)",
-                state='disabled'
-            )
-        
+                state='disabled',
+                style='TButton'
+            )   
         self.auto_translate_button.pack(side=tk.LEFT, padx=(5, 0))
         
         # Section de droite - Outils secondaires
@@ -311,6 +335,14 @@ class UnityTextManagerGUI:
             text="🗑️ Supprimer sélection",
             command=self.remove_selected_texts,
             style='Danger.TButton'
+        ).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # NOUVEAU: Bouton pour filtrer les TextAssets uniquement
+        ttk.Button(
+            right_tools,
+            text="📄 TextAssets uniquement",
+            command=self.filter_textassets_only,
+            style='Warning.TButton'
         ).pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Button(
@@ -375,7 +407,7 @@ class UnityTextManagerGUI:
         filter_combo.pack(side=tk.LEFT, padx=(5, 0))
         filter_combo.bind('<<ComboboxSelected>>', lambda e: self.filter_text_list())
         
-        # Treeview amélioré
+        # Treeview amélioré avec sélection multiple
         tree_frame = ttk.Frame(list_section)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -384,7 +416,8 @@ class UnityTextManagerGUI:
             tree_frame, 
             columns=columns, 
             show='headings',
-            height=15
+            height=15,
+            selectmode='extended'  # Permet la sélection multiple
         )
         
         # Configuration des colonnes
@@ -415,9 +448,22 @@ class UnityTextManagerGUI:
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
         
-        # Bind pour la sélection
+        # Binds pour la sélection et raccourcis clavier
         self.text_tree.bind('<<TreeviewSelect>>', self.on_text_select)
         self.text_tree.bind('<Double-1>', self.on_text_double_click)
+        self.text_tree.bind('<Button-3>', self.show_context_menu)  # Clic droit
+        
+        # Raccourcis clavier pour sélection
+        self.text_tree.bind('<Control-a>', self.select_all_texts)
+        self.text_tree.bind('<Control-A>', self.select_all_texts)  # Majuscule aussi
+        self.text_tree.bind('<Escape>', self.deselect_all_texts)  # Échap pour désélectionner
+        self.text_tree.bind('<Delete>', self.delete_selected_texts)  # Suppr pour supprimer
+        
+        # Focus sur le TreeView pour les raccourcis clavier
+        self.text_tree.focus_set()
+        
+        # Créer le menu contextuel
+        self.create_context_menu()
 
     def create_injection_tab(self):
         """Crée l'onglet d'injection amélioré"""
@@ -504,7 +550,7 @@ class UnityTextManagerGUI:
         self.stop_inject_button = ttk.Button(
             control_buttons,
             text="⏹️ Arrêter l'injection",
-            command=self.stop_injection,
+            command=self.stop_current_injection,
             style='Danger.TButton'
         )
         
@@ -538,102 +584,6 @@ class UnityTextManagerGUI:
         )
         self.injection_log.pack(fill=tk.BOTH, expand=True)
 
-    def create_settings_tab(self):
-        """Crée l'onglet des paramètres"""
-        settings_frame = ttk.Frame(self.notebook, padding="15")
-        self.notebook.add(settings_frame, text="⚙️ Paramètres")
-        
-        # Section OpenAI
-        openai_section = ttk.LabelFrame(settings_frame, text="🤖 Configuration OpenAI", padding="15")
-        openai_section.pack(fill=tk.X, pady=(0, 20))
-        
-        if OPENAI_AVAILABLE:
-            ttk.Label(
-                openai_section,
-                text="✅ Module OpenAI disponible",
-                foreground='green'
-            ).pack(anchor=tk.W, pady=(0, 10))
-            
-            # Configuration de la clé API
-            api_frame = ttk.Frame(openai_section)
-            api_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            ttk.Label(api_frame, text="Clé API:").pack(side=tk.LEFT)
-            
-            self.api_key_var = tk.StringVar()
-            api_entry = ttk.Entry(
-                api_frame,
-                textvariable=self.api_key_var,
-                show="*",
-                width=40
-            )
-            api_entry.pack(side=tk.LEFT, padx=(10, 5))
-            
-            ttk.Button(
-                api_frame,
-                text="Tester",
-                command=self.test_api_key
-            ).pack(side=tk.LEFT)
-            
-            # Bouton pour charger depuis l'environnement
-            ttk.Button(
-                openai_section,
-                text="📂 Charger depuis variable d'environnement",
-                command=self.load_api_key_from_env
-            ).pack(anchor=tk.W)
-            
-        else:
-            ttk.Label(
-                openai_section,
-                text="❌ Module OpenAI non disponible",
-                foreground='red'
-            ).pack(anchor=tk.W)
-            
-            ttk.Label(
-                openai_section,
-                text="Installez avec: pip install openai langdetect"
-            ).pack(anchor=tk.W, pady=(5, 0))
-        
-        # Section générale
-        general_section = ttk.LabelFrame(settings_frame, text="🔧 Paramètres généraux", padding="15")
-        general_section.pack(fill=tk.X, pady=(0, 20))
-        
-        self.auto_save_var = tk.BooleanVar(value=True)
-        self.confirm_actions_var = tk.BooleanVar(value=True)
-        self.detailed_logs_var = tk.BooleanVar(value=False)
-        
-        ttk.Checkbutton(
-            general_section,
-            text="💾 Sauvegarde automatique après traduction",
-            variable=self.auto_save_var
-        ).pack(anchor=tk.W, pady=2)
-        
-        ttk.Checkbutton(
-            general_section,
-            text="❓ Demander confirmation pour les actions critiques",
-            variable=self.confirm_actions_var
-        ).pack(anchor=tk.W, pady=2)
-        
-        ttk.Checkbutton(
-            general_section,
-            text="📝 Logs détaillés",
-            variable=self.detailed_logs_var
-        ).pack(anchor=tk.W, pady=2)
-        
-        # Section à propos
-        about_section = ttk.LabelFrame(settings_frame, text="ℹ️ À propos", padding="15")
-        about_section.pack(fill=tk.X)
-        
-        about_text = (
-            "Unity Text Manager v2.0\n"
-            "Outil de gestion et traduction de textes pour jeux Unity\n\n"
-            "Dépendances:\n"
-            "• UnityPy - Manipulation des fichiers Unity\n"
-            "• OpenAI (optionnel) - Traduction automatique\n"
-            "• langdetect (optionnel) - Détection de langue"
-        )
-        
-        ttk.Label(about_section, text=about_text).pack(anchor=tk.W)
 
     def create_log_section(self, parent):
         """Crée la section des logs"""
@@ -695,31 +645,6 @@ class UnityTextManagerGUI:
         except Exception as e:
             messagebox.showerror("Erreur", f"Impossible de sauvegarder les logs: {e}")
 
-    def test_api_key(self):
-        """Teste la clé API OpenAI"""
-        api_key = self.api_key_var.get().strip()
-        if not api_key:
-            messagebox.showerror("Erreur", "Veuillez saisir une clé API")
-            return
-        
-        try:
-            translator = OpenAITranslator(api_key)
-            if translator.is_available():
-                messagebox.showinfo("Succès", "✅ Clé API valide")
-                self.translator = translator
-            else:
-                messagebox.showerror("Erreur", "❌ Clé API invalide")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors du test: {e}")
-
-    def load_api_key_from_env(self):
-        """Charge la clé API depuis les variables d'environnement"""
-        api_key = os.environ.get('OPENAI_API_KEY', '')
-        if api_key:
-            self.api_key_var.set(api_key)
-            messagebox.showinfo("Succès", "Clé API chargée depuis l'environnement")
-        else:
-            messagebox.showwarning("Attention", "Variable d'environnement OPENAI_API_KEY non trouvée")
 
     def sort_tree(self, column):
         """Trie le TreeView par colonne"""
@@ -780,8 +705,14 @@ class UnityTextManagerGUI:
 
     def on_text_select(self, event):
         """Appelé quand un texte est sélectionné"""
-        # Cette méthode peut être étendue pour afficher des informations
-        pass
+        # Afficher le nombre d'éléments sélectionnés
+        selected_count = len(self.text_tree.selection())
+        if selected_count > 1:
+            self.update_status_indicator(f"{selected_count} éléments sélectionnés", 'blue')
+        elif selected_count == 1:
+            self.update_status_indicator("1 élément sélectionné", 'blue')
+        else:
+            self.update_status_indicator("Prêt", 'green')
 
     def on_text_double_click(self, event):
         """Appelé lors du double-clic sur un texte"""
@@ -807,6 +738,33 @@ class UnityTextManagerGUI:
                 return text_entry
         
         return None
+
+    def select_all_texts(self, event=None):
+        """Sélectionne tous les textes dans le TreeView (Ctrl+A)"""
+        if not self.current_texts:
+            return 'break'
+        
+        # Sélectionner tous les éléments
+        all_items = self.text_tree.get_children()
+        if all_items:
+            self.text_tree.selection_set(all_items)
+            self.update_status_indicator(f"Tous les {len(all_items)} éléments sélectionnés", 'blue')
+            print(f"📋 Tous les {len(all_items)} éléments sélectionnés avec Ctrl+A")
+        
+        return 'break'  # Empêche la propagation de l'événement
+
+    def deselect_all_texts(self, event=None):
+        """Désélectionne tous les textes dans le TreeView (Échap)"""
+        self.text_tree.selection_remove(self.text_tree.selection())
+        self.update_status_indicator("Prêt", 'green')
+        print("📋 Sélection effacée avec Échap")
+        return 'break'
+
+    def delete_selected_texts(self, event=None):
+        """Supprime les textes sélectionnés avec la touche Suppr"""
+        if self.text_tree.selection():
+            self.remove_selected_texts()
+        return 'break'
 
     def remove_selected_texts(self):
         """NOUVEAU: Supprime les textes sélectionnés de la liste"""
@@ -861,6 +819,277 @@ class UnityTextManagerGUI:
         
         print(f"🗑️ {removed_count} textes supprimés de la liste")
 
+    def filter_textassets_only(self):
+        """NOUVEAU: Filtre pour ne garder que les TextAssets"""
+        if not self.current_texts:
+            messagebox.showerror("Erreur", "Aucun texte chargé")
+            return
+        
+        # Compter les TextAssets actuels
+        textasset_count = len([
+            t for t in self.current_texts['texts'] 
+            if t.get('asset_type', '').lower() == 'textasset'
+        ])
+        
+        total_count = len(self.current_texts['texts'])
+        other_count = total_count - textasset_count
+        
+        if other_count == 0:
+            messagebox.showinfo("Information", "✅ Seuls des TextAssets sont déjà présents dans la liste")
+            return
+        
+        # Demander confirmation
+        if self.confirm_actions_var.get():
+            result = messagebox.askyesno(
+                "Filtrer les TextAssets",
+                f"📄 Filtrage des TextAssets uniquement\n\n"
+                f"Cette action va supprimer {other_count} éléments qui ne sont pas des TextAssets.\n"
+                f"TextAssets conservés: {textasset_count}\n"
+                f"Autres types supprimés: {other_count}\n\n"
+                f"⚠️ Cette action ne peut pas être annulée.\n"
+                f"Les fichiers originaux ne seront pas affectés.\n\n"
+                f"Voulez-vous continuer ?"
+            )
+            if not result:
+                return
+        
+        # Filtrer pour ne garder que les TextAssets
+        original_count = len(self.current_texts['texts'])
+        self.current_texts['texts'] = [
+            text for text in self.current_texts['texts'] 
+            if text.get('asset_type', '').lower() == 'textasset'
+        ]
+        
+        # Mettre à jour le total
+        self.current_texts['total_texts'] = len(self.current_texts['texts'])
+        
+        # Rafraîchir l'interface
+        self.update_text_list()
+        self.update_stats()
+        
+        filtered_count = original_count - len(self.current_texts['texts'])
+        messagebox.showinfo(
+            "Filtrage terminé",
+            f"✅ Filtrage des TextAssets terminé.\n\n"
+            f"📄 TextAssets conservés: {len(self.current_texts['texts'])}\n"
+            f"🗑️ Autres types supprimés: {filtered_count}\n\n"
+            f"La traduction intelligente se concentrera maintenant\n"
+            f"uniquement sur les TextAssets."
+        )
+        
+        print(f"📄 Filtrage TextAssets: {len(self.current_texts['texts'])} conservés, {filtered_count} supprimés")
+
+    def create_context_menu(self):
+        """Crée le menu contextuel pour le TreeView"""
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        
+        # Options de statut
+        self.context_menu.add_command(
+            label="📝 Marquer comme original",
+            command=self.mark_as_original
+        )
+        self.context_menu.add_command(
+            label="✅ Marquer comme traduit", 
+            command=self.mark_as_translated
+        )
+        self.context_menu.add_separator()
+        
+        # Options d'action
+        self.context_menu.add_command(
+            label="✏️ Éditer le texte",
+            command=self.edit_selected_text
+        )
+        self.context_menu.add_command(
+            label="🧠 Traduire intelligemment",
+            command=self.translate_selected_intelligently
+        )
+        self.context_menu.add_separator()
+        
+        # Options de manipulation
+        self.context_menu.add_command(
+            label="🗑️ Supprimer de la liste",
+            command=self.remove_selected_texts
+        )
+
+    def show_context_menu(self, event):
+        """Affiche le menu contextuel au clic droit"""
+        # Identifier l'élément sous le curseur
+        item = self.text_tree.identify_row(event.y)
+        if item:
+            # Sélectionner l'élément si pas déjà sélectionné
+            if item not in self.text_tree.selection():
+                self.text_tree.selection_set(item)
+            
+            # Obtenir les informations sur l'élément sélectionné
+            item_data = self.text_tree.item(item)
+            text_id = item_data['values'][0]
+            text_entry = self.find_text_by_id(text_id)
+            
+            # Adapter le menu selon le statut actuel
+            is_translated = text_entry.get('is_translated', False) if text_entry else False
+            
+            # Activer/désactiver les options selon le contexte
+            if is_translated:
+                self.context_menu.entryconfig(0, state="normal")  # Marquer original
+                self.context_menu.entryconfig(1, state="disabled")  # Marquer traduit
+                self.context_menu.entryconfig(4, state="disabled")  # Traduire
+            else:
+                self.context_menu.entryconfig(0, state="disabled")  # Marquer original
+                self.context_menu.entryconfig(1, state="normal")  # Marquer traduit
+                self.context_menu.entryconfig(4, state="normal")  # Traduire
+            
+            # Afficher le menu à la position du curseur
+            try:
+                self.context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.context_menu.grab_release()
+
+    def mark_as_original(self):
+        """Marque les textes sélectionnés comme originaux (non traduits)"""
+        selected_items = self.text_tree.selection()
+        if not selected_items:
+            return
+        
+        updated_count = 0
+        for item in selected_items:
+            item_values = self.text_tree.item(item)['values']
+            if item_values:
+                text_id = item_values[0]
+                text_entry = self.find_text_by_id(text_id)
+                if text_entry and text_entry.get('is_translated', False):
+                    text_entry['is_translated'] = False
+                    # Optionnel : effacer la traduction
+                    # text_entry['translated_text'] = ""
+                    updated_count += 1
+        
+        if updated_count > 0:
+            self.update_text_list()
+            self.update_stats()
+            print(f"📝 {updated_count} texte(s) marqué(s) comme original")
+
+    def mark_as_translated(self):
+        """Marque les textes sélectionnés comme traduits"""
+        selected_items = self.text_tree.selection()
+        if not selected_items:
+            return
+        
+        updated_count = 0
+        for item in selected_items:
+            item_values = self.text_tree.item(item)['values']
+            if item_values:
+                text_id = item_values[0]
+                text_entry = self.find_text_by_id(text_id)
+                if text_entry and not text_entry.get('is_translated', False):
+                    text_entry['is_translated'] = True
+                    # S'assurer qu'il y a une traduction (même si identique)
+                    if not text_entry.get('translated_text', ''):
+                        text_entry['translated_text'] = text_entry.get('original_text', '')
+                    updated_count += 1
+        
+        if updated_count > 0:
+            self.update_text_list()
+            self.update_stats()
+            print(f"✅ {updated_count} texte(s) marqué(s) comme traduit")
+
+    def edit_selected_text(self):
+        """Édite le texte sélectionné"""
+        selected_items = self.text_tree.selection()
+        if not selected_items:
+            return
+        
+        # Prendre le premier élément sélectionné
+        item = selected_items[0]
+        item_values = self.text_tree.item(item)['values']
+        if item_values:
+            text_id = item_values[0]
+            text_entry = self.find_text_by_id(text_id)
+            if text_entry:
+                self.show_text_editor(text_entry)
+
+    def translate_selected_intelligently(self):
+        """Lance la traduction intelligente sur les textes sélectionnés"""
+        if not INTELLIGENT_TRANSLATOR_AVAILABLE:
+            messagebox.showerror("Erreur", "Traducteur intelligent non disponible")
+            return
+        
+        selected_items = self.text_tree.selection()
+        if not selected_items:
+            return
+        
+        # Récupérer les textes sélectionnés
+        texts_to_translate = []
+        for item in selected_items:
+            item_values = self.text_tree.item(item)['values']
+            if item_values:
+                text_id = item_values[0]
+                text_entry = self.find_text_by_id(text_id)
+                if text_entry:
+                    texts_to_translate.append(text_entry)
+        
+        if not texts_to_translate:
+            return
+        
+        # Demander confirmation
+        count = len(texts_to_translate)
+        result = messagebox.askyesno(
+            "Traduction intelligente",
+            f"Traduire intelligemment {count} texte(s) sélectionné(s) ?\n\n"
+            f"Cette opération utilisera l'API OpenAI."
+        )
+        
+        if result:
+            self.translate_selected_texts_worker(texts_to_translate)
+
+    def translate_selected_texts_worker(self, texts_to_translate):
+        """Thread worker pour traduire les textes sélectionnés"""
+        def translate_worker():
+            try:
+                if not self.intelligent_translator:
+                    self.intelligent_translator = IntelligentTranslatorAdapter()
+                
+                # Analyser le contexte si nécessaire
+                if not self.intelligent_translator.context_analyzed:
+                    self.intelligent_translator.analyze_global_context(self.current_texts['texts'])
+                
+                translated_count = 0
+                for text_entry in texts_to_translate:
+                    original_text = text_entry.get('original_text', '')
+                    file_context = f"{text_entry.get('asset_type', 'Unity')} - {text_entry.get('asset_name', 'Asset')}"
+                    
+                    translated_text = self.intelligent_translator.translate_with_context(
+                        original_text,
+                        self.intelligent_translator.global_context,
+                        file_context
+                    )
+                    
+                    if translated_text != original_text:
+                        text_entry['translated_text'] = translated_text
+                        text_entry['is_translated'] = True
+                        translated_count += 1
+                
+                # Mettre à jour l'interface dans le thread principal
+                self.root.after(0, self.update_text_list)
+                self.root.after(0, self.update_stats)
+                
+                # Message de fin
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Traduction terminée",
+                    f"✅ {translated_count} texte(s) traduit(s) avec succès!"
+                ))
+                
+            except Exception as e:
+                error_msg = str(e)
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Erreur de traduction",
+                    f"Erreur lors de la traduction:\n{error_msg}"
+                ))
+        
+        # Lancer dans un thread séparé
+        import threading
+        thread = threading.Thread(target=translate_worker)
+        thread.daemon = True
+        thread.start()
+
     def on_closing(self):
         """Gestion de la fermeture de l'application"""
         if self.scanning or self.translating or self.injecting:
@@ -892,28 +1121,232 @@ class UnityTextManagerGUI:
             self.game_path.set(folder_path)
             self.update_status_indicator("Dossier sélectionné")
 
+    def browse_file(self):
+        """Ouvre la boîte de dialogue pour sélectionner un fichier unique"""
+        file_path = filedialog.askopenfilename(
+            title="Sélectionnez un fichier Unity à analyser",
+            initialdir=self.game_path.get() if self.game_path.get() else os.path.expanduser("~"),
+            filetypes=[
+                ("Tous les fichiers Unity", "*.assets;*.unity;*.asset;*.bundle;*.json;*.txt;*.xml"),
+                ("Fichiers Assets", "*.assets"),
+                ("Fichiers Unity Scene", "*.unity"),
+                ("Fichiers Asset", "*.asset"),
+                ("Fichiers Bundle", "*.bundle"),
+                ("Fichiers JSON", "*.json"),
+                ("Fichiers texte", "*.txt"),
+                ("Fichiers XML", "*.xml"),
+                ("Tous les fichiers", "*.*")
+            ]
+        )
+        if file_path:
+            # Définir le chemin du fichier comme chemin de travail
+            self.game_path.set(file_path)
+            self.update_status_indicator("Fichier sélectionné")
+            print(f"📄 Fichier sélectionné: {Path(file_path).name}")
+            print(f"📁 Chemin complet: {file_path}")
+
     def stop_current_scan(self):
         """Arrête le scan en cours"""
-        # Cette méthode sera implémentée avec un système d'arrêt
-        self.update_status_indicator("Arrêt du scan demandé", 'orange')
+        if hasattr(self, 'scan_stop_flag'):
+            self.scan_stop_flag = True
+            self.status_label.config(text="Arrêt en cours...")
+            self.log("⏹️ Arrêt du scan demandé par l'utilisateur")
 
-    def stop_injection(self):
+    def start_manual_xor_decrypt(self):
+        """Lance le décryptage XOR manuel"""
+        if not self.game_path.get():
+            messagebox.showwarning("Dossier manquant", "Veuillez sélectionner un dossier de jeu d'abord.")
+            return
+        
+        # Créer une fenêtre de dialogue pour le décryptage XOR
+        xor_window = tk.Toplevel(self.root)
+        xor_window.title("Décryptage XOR Manuel")
+        xor_window.geometry("600x400")
+        xor_window.transient(self.root)
+        xor_window.grab_set()
+        
+        # Frame principal
+        main_frame = ttk.Frame(xor_window, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre et description
+        ttk.Label(main_frame, text="🔓 Décryptage XOR Manuel", font=('Arial', 14, 'bold')).pack(pady=(0, 10))
+        
+        description = ttk.Label(
+            main_frame, 
+            text="Cette fonction force le décryptage XOR sur tous les fichiers .srt du dossier sélectionné.\n"
+                 "Utilisez cette option seulement si vous savez que vos fichiers sont cryptés.",
+            font=('Arial', 9),
+            foreground='gray',
+            justify=tk.LEFT
+        )
+        description.pack(pady=(0, 15), anchor=tk.W)
+        
+        # Section options
+        options_frame = ttk.LabelFrame(main_frame, text="Options de décryptage", padding="10")
+        options_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Variables
+        self.xor_key_var = tk.StringVar(value="0xAA")
+        self.force_decrypt_var = tk.BooleanVar(value=True)
+        
+        # Clé XOR
+        key_frame = ttk.Frame(options_frame)
+        key_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(key_frame, text="Clé XOR:", width=15).pack(side=tk.LEFT)
+        key_entry = ttk.Entry(key_frame, textvariable=self.xor_key_var, width=10)
+        key_entry.pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Label(key_frame, text="(hex: 0xAA ou décimal: 170)", foreground='gray').pack(side=tk.LEFT)
+        
+        # Option forcer
+        ttk.Checkbutton(
+            options_frame, 
+            text="Forcer le décryptage (ignorer la détection automatique)",
+            variable=self.force_decrypt_var
+        ).pack(anchor=tk.W, pady=5)
+        
+        # Zone de progression
+        progress_frame = ttk.LabelFrame(main_frame, text="Progression", padding="10")
+        progress_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.xor_progress_var = tk.DoubleVar()
+        self.xor_progress_bar = ttk.Progressbar(
+            progress_frame, 
+            variable=self.xor_progress_var, 
+            maximum=100
+        )
+        self.xor_progress_bar.pack(fill=tk.X, pady=(0, 5))
+        
+        self.xor_status_label = ttk.Label(progress_frame, text="Prêt à démarrer")
+        self.xor_status_label.pack(anchor=tk.W)
+        
+        # Boutons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        ttk.Button(
+            button_frame,
+            text="🔓 Démarrer le décryptage",
+            command=lambda: self.execute_manual_xor_decrypt(xor_window),
+            style='Action.TButton'
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame,
+            text="❌ Annuler",
+            command=xor_window.destroy
+        ).pack(side=tk.RIGHT)
+
+    def execute_manual_xor_decrypt(self, window):
+        """Exécute le décryptage XOR manuel"""
+        try:
+            # Parser la clé XOR
+            key_str = self.xor_key_var.get().strip()
+            if key_str.startswith('0x') or key_str.startswith('0X'):
+                xor_key = int(key_str, 16)
+            else:
+                xor_key = int(key_str)
+            
+            if not (0 <= xor_key <= 255):
+                raise ValueError("Clé doit être entre 0 et 255")
+                
+        except ValueError as e:
+            messagebox.showerror("Erreur", f"Clé XOR invalide: {e}")
+            return
+        
+        force_decrypt = self.force_decrypt_var.get()
+        
+        def decrypt_thread():
+            try:
+                from xor_decoder import xor_decoder
+                from pathlib import Path
+                import os
+                
+                game_path = Path(self.game_path.get())
+                srt_files = []
+                
+                # Trouver tous les fichiers .srt
+                for root, dirs, files in os.walk(game_path):
+                    for file in files:
+                        if file.lower().endswith('.srt'):
+                            srt_files.append(Path(root) / file)
+                
+                if not srt_files:
+                    self.root.after(0, lambda: messagebox.showinfo("Info", "Aucun fichier .srt trouvé"))
+                    return
+                
+                total_files = len(srt_files)
+                decrypted_count = 0
+                
+                self.root.after(0, lambda: self.xor_status_label.config(text=f"Traitement de {total_files} fichiers..."))
+                
+                for i, srt_file in enumerate(srt_files):
+                    progress = (i + 1) / total_files * 100
+                    self.root.after(0, lambda p=progress: self.xor_progress_var.set(p))
+                    self.root.after(0, lambda f=srt_file.name: self.xor_status_label.config(text=f"Décryptage: {f}"))
+                    
+                    # Vérifier si le fichier doit être décrypté
+                    should_decrypt = force_decrypt or xor_decoder.is_likely_obfuscated(srt_file)
+                    
+                    if should_decrypt:
+                        # Décrypter le fichier
+                        decoded_data = xor_decoder.decode_file(srt_file, xor_key)
+                        if decoded_data:
+                            # Sauvegarder le fichier décrypté
+                            temp_file = xor_decoder.save_decoded_temp(srt_file, decoded_data, xor_key)
+                            if temp_file:
+                                decrypted_count += 1
+                
+                self.root.after(0, lambda: self.xor_status_label.config(text=f"Terminé: {decrypted_count}/{total_files} fichiers décryptés"))
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Décryptage terminé", 
+                    f"Décryptage terminé!\n"
+                    f"Fichiers traités: {total_files}\n"
+                    f"Fichiers décryptés: {decrypted_count}\n"
+                    f"Clé utilisée: 0x{xor_key:02X} ({xor_key})\n\n"
+                    f"Les fichiers décryptés sont sauvés dans le dossier 'decoded_temp'."
+                ))
+                
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Erreur", f"Erreur lors du décryptage: {e}"))
+        
+        # Lancer le décryptage dans un thread séparé
+        import threading
+        thread = threading.Thread(target=decrypt_thread, daemon=True)
+        thread.start()
+
+    def stop_current_injection(self):
         """Arrête l'injection en cours"""
-        # Cette méthode sera implémentée avec un système d'arrêt
-        self.update_status_indicator("Arrêt de l'injection demandé", 'orange')
+        if hasattr(self, 'injection_stop_flag'):
+            self.injection_stop_flag = True
+            self.log("⏹️ Arrêt de l'injection demandé par l'utilisateur")
 
     def clear_cache(self):
         """Vide le cache de traductions"""
         try:
-            if self.translator:
-                self.translator.clear_cache()
+            # Vider le cache du traducteur intelligent
+            if self.intelligent_translator:
+                self.intelligent_translator.clear_cache()
             
-            cache_file = "translation_cache.json"
-            if os.path.exists(cache_file):
-                os.remove(cache_file)
+            # Supprimer les fichiers de cache
+            cache_files = [
+                "translation_cache.json",
+                "intelligent_context_cache.json",
+                "intelligent_translations_cache.txt"
+            ]
             
-            messagebox.showinfo("Cache", "Cache de traductions effacé avec succès.")
-            print("🧹 Cache vidé")
+            removed_files = []
+            for cache_file in cache_files:
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
+                    removed_files.append(cache_file)
+            
+            cache_info = "Cache effacé avec succès."
+            if removed_files:
+                cache_info += f"\nFichiers supprimés: {', '.join(removed_files)}"
+            
+            messagebox.showinfo("Cache", cache_info)
+            print("🧹 Cache vidé (basique + intelligent)")
             
         except Exception as e:
             messagebox.showerror("Erreur", f"Impossible d'effacer le cache: {e}")
@@ -1180,12 +1613,15 @@ class UnityTextManagerGUI:
             translated_text.insert(tk.END, text_entry.get('original_text', ''))
         
         def auto_translate_this():
-            if not OPENAI_AVAILABLE:
-                messagebox.showerror("Erreur", "OpenAI non disponible")
+            if not (OPENAI_AVAILABLE or INTELLIGENT_TRANSLATOR_AVAILABLE):
+                messagebox.showerror("Erreur", "Traducteur non disponible")
                 return
             
             editor_window.destroy()
-            self.translate_single_resource(text_entry)
+            if INTELLIGENT_TRANSLATOR_AVAILABLE:
+                self.translate_single_resource_intelligent(text_entry)
+            else:
+                self.translate_single_resource(text_entry)
         
         # Boutons de gauche
         left_buttons = ttk.Frame(button_section)
@@ -1205,7 +1641,14 @@ class UnityTextManagerGUI:
         ).pack(side=tk.LEFT, padx=(0, 10))
         
         # Bouton de traduction automatique
-        if OPENAI_AVAILABLE:
+        if INTELLIGENT_TRANSLATOR_AVAILABLE:
+            ttk.Button(
+                left_buttons,
+                text="🧠 Traduire intelligemment",
+                command=auto_translate_this,
+                style='Action.TButton'
+            ).pack(side=tk.LEFT)
+        elif OPENAI_AVAILABLE:
             ttk.Button(
                 left_buttons,
                 text="🤖 Traduire automatiquement",
@@ -1220,8 +1663,71 @@ class UnityTextManagerGUI:
             command=editor_window.destroy
         ).pack(side=tk.RIGHT)
 
+    def setup_intelligent_translation(self):
+        """Configure le système de traduction intelligente"""
+        if not INTELLIGENT_TRANSLATOR_AVAILABLE:
+            messagebox.showerror(
+                "Traducteur intelligent non disponible",
+                "Le module de traduction intelligente n'est pas disponible.\n"
+                "Vérifiez que le fichier intelligent_translator_adapter.py est présent."
+            )
+            return
+        
+        if not self.current_texts:
+            messagebox.showerror("Erreur", "Aucun texte à traduire. Effectuez d'abord un scan.")
+            return
+        
+        # Vérifier si l'utilisateur préfère le traducteur basique
+        use_basic = getattr(self, 'use_basic_translator_var', None)
+        if use_basic and use_basic.get():
+            self.setup_auto_translation()
+            return
+        
+        # Initialiser le traducteur intelligent
+        if not self.intelligent_translator:
+            self.intelligent_translator = IntelligentTranslatorAdapter()
+            
+            if not self.intelligent_translator.is_available():
+                messagebox.showerror(
+                    "Configuration requise",
+                    "Impossible d'initialiser le traducteur intelligent.\n"
+                    "Vérifiez votre clé API OpenAI."
+                )
+                return
+        
+        # Charger le cache intelligent
+        self.intelligent_translator.load_context_cache()
+        print("✅ Traducteur intelligent initialisé")
+        
+        # Compter les textes non traduits
+        untranslated_count = len([
+            t for t in self.current_texts['texts'] 
+            if not t.get('is_translated', False)
+        ])
+        
+        if untranslated_count == 0:
+            messagebox.showinfo("Information", "✅ Tous les textes sont déjà traduits")
+            return
+        
+        # Demander confirmation avec informations sur l'analyse intelligente
+        result = messagebox.askyesno(
+            "Traduction intelligente",
+            f"🧠 Traduction intelligente avec analyse contextuelle\n\n"
+            f"Cette fonctionnalité va:\n"
+            f"• Analyser le contexte global de votre jeu\n"
+            f"• Identifier les personnages et le style\n"
+            f"• Traduire {untranslated_count} textes avec cohérence\n"
+            f"• Valider automatiquement les traductions\n\n"
+            f"⚠️ Première utilisation: analyse plus longue\n"
+            f"💰 Utilise l'API OpenAI\n\n"
+            f"Voulez-vous continuer ?"
+        )
+        
+        if result:
+            self.start_intelligent_translation()
+    
     def setup_auto_translation(self):
-        """Configure le système de traduction automatique"""
+        """Configure le système de traduction automatique (basique)"""
         if not OPENAI_AVAILABLE:
             messagebox.showerror(
                 "OpenAI non disponible",
@@ -1234,21 +1740,9 @@ class UnityTextManagerGUI:
             messagebox.showerror("Erreur", "Aucun texte à traduire. Effectuez d'abord un scan.")
             return
         
-        # Utiliser le traducteur configuré ou en créer un nouveau
-        if not self.translator:
-            api_key = self.api_key_var.get() if hasattr(self, 'api_key_var') else None
-            self.translator = OpenAITranslator(api_key)
-            
-            if not self.translator.is_available():
-                messagebox.showerror(
-                    "Configuration requise",
-                    "Veuillez configurer votre clé API OpenAI dans l'onglet Paramètres."
-                )
-                return
-        
-        # Charger le cache
-        self.translator.load_cache()
-        print("✅ Traducteur initialisé avec succès")
+        # Rediriger vers le traducteur intelligent
+        self.setup_intelligent_translation()
+        return
         
         # Compter les textes non traduits
         untranslated_count = len([
@@ -1271,8 +1765,36 @@ class UnityTextManagerGUI:
         if result:
             self.start_auto_translation()
 
+    def start_intelligent_translation(self):
+        """Démarre la traduction intelligente"""
+        if not self.current_texts or self.translating:
+            return
+        
+        # Préparer la liste des textes à traduire
+        texts_to_translate = [
+            t for t in self.current_texts['texts'] 
+            if not t.get('is_translated', False)
+        ]
+        
+        if not texts_to_translate:
+            messagebox.showinfo("Information", "Tous les textes sont déjà traduits")
+            return
+        
+        self.translating = True
+        self.stop_translation = False
+        self.auto_translate_button.config(state="disabled", text="⏳ Analyse et traduction...")
+        self.update_status_indicator("Traduction intelligente en cours", 'blue')
+        
+        # Créer une fenêtre de progression intelligente
+        self.create_intelligent_translation_window(len(texts_to_translate))
+        
+        # Démarrer la traduction intelligente dans un thread
+        thread = threading.Thread(target=self.run_intelligent_translation, args=(texts_to_translate,))
+        thread.daemon = True
+        thread.start()
+    
     def start_auto_translation(self):
-        """Démarre la traduction automatique"""
+        """Démarre la traduction automatique basique"""
         if not self.current_texts or self.translating:
             return
         
@@ -1359,6 +1881,86 @@ class UnityTextManagerGUI:
         )
         info_label.pack(side=tk.RIGHT)
 
+    def create_intelligent_translation_window(self, total_texts: int):
+        """Crée une fenêtre de progression pour la traduction intelligente"""
+        self.progress_window = tk.Toplevel(self.root)
+        self.progress_window.title("🧠 Traduction Intelligente")
+        self.progress_window.geometry("600x300")
+        self.progress_window.transient(self.root)
+        self.progress_window.grab_set()
+        
+        # Empêcher la fermeture par X
+        self.progress_window.protocol("WM_DELETE_WINDOW", self.stop_auto_translation)
+        
+        progress_frame = ttk.Frame(self.progress_window, padding="20")
+        progress_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre
+        title_label = ttk.Label(
+            progress_frame,
+            text=f"🧠 Traduction intelligente de {total_texts} textes",
+            font=('Arial', 12, 'bold')
+        )
+        title_label.pack(pady=(0, 10))
+        
+        # Sous-titre explicatif
+        subtitle_label = ttk.Label(
+            progress_frame,
+            text="Analyse contextuelle globale puis traduction cohérente",
+            font=('Arial', 10),
+            foreground='gray'
+        )
+        subtitle_label.pack(pady=(0, 15))
+        
+        # Barre de progression
+        self.translation_progress_var = tk.DoubleVar(value=0)
+        self.translation_progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.translation_progress_var,
+            maximum=100,
+            length=500
+        )
+        self.translation_progress_bar.pack(fill=tk.X, pady=(0, 10))
+        
+        # Label de statut
+        self.translation_status_label = ttk.Label(
+            progress_frame,
+            text="🔍 Phase 1: Analyse du contexte global en cours..."
+        )
+        self.translation_status_label.pack(pady=(0, 15))
+        
+        # Zone d'informations d'analyse
+        info_frame = ttk.LabelFrame(progress_frame, text="📊 Informations d'analyse", padding="10")
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.analysis_info_label = ttk.Label(
+            info_frame,
+            text="En attente de l'analyse...",
+            font=('Arial', 9)
+        )
+        self.analysis_info_label.pack(anchor=tk.W)
+        
+        # Boutons de contrôle
+        button_frame = ttk.Frame(progress_frame)
+        button_frame.pack(fill=tk.X)
+        
+        self.stop_button = ttk.Button(
+            button_frame,
+            text="⏹️ Arrêter",
+            command=self.stop_auto_translation,
+            style='Danger.TButton'
+        )
+        self.stop_button.pack(side=tk.LEFT)
+        
+        # Informations supplémentaires
+        info_label = ttk.Label(
+            button_frame,
+            text="💡 Première analyse plus longue, puis traduction accélérée",
+            font=('Arial', 8),
+            foreground='gray'
+        )
+        info_label.pack(side=tk.RIGHT)
+
     def stop_auto_translation(self):
         """Arrête la traduction automatique"""
         self.stop_translation = True
@@ -1438,11 +2040,107 @@ class UnityTextManagerGUI:
                     f"Cache sauvegardé automatiquement."
                 ))
 
+    def run_intelligent_translation(self, texts_to_translate: List[Dict]):
+        """Exécute la traduction intelligente dans un thread séparé"""
+        translated_count = 0
+        
+        try:
+            print(f"🧠 Début de la traduction intelligente de {len(texts_to_translate)} textes")
+            
+            def update_translation_progress(value: float, status: str):
+                if hasattr(self, 'translation_progress_var') and hasattr(self, 'translation_status_label'):
+                    self.root.after(0, lambda: self.translation_progress_var.set(value))
+                    self.root.after(0, lambda: self.translation_status_label.config(text=status))
+            
+            def update_analysis_info(info: str):
+                if hasattr(self, 'analysis_info_label'):
+                    self.root.after(0, lambda: self.analysis_info_label.config(text=info))
+            
+            def should_stop():
+                return getattr(self, 'stop_translation', False)
+            
+            # Phase 1: Analyse du contexte si pas encore fait
+            if not self.intelligent_translator.context_analyzed:
+                update_translation_progress(5, "🔍 Phase 1: Analyse globale du contexte...")
+                context = self.intelligent_translator.analyze_global_context(self.current_texts['texts'])
+                
+                # Mettre à jour les informations d'analyse
+                stats = self.intelligent_translator.get_stats()
+                analysis_text = (
+                    f"• Type de jeu: {stats.get('game_type', 'Analysé')}\n"
+                    f"• Personnages détectés: {stats.get('characters_found', 0)}\n"
+                    f"• Cache intelligent: {stats.get('cache_size', 0)} traductions"
+                )
+                update_analysis_info(analysis_text)
+            
+            # Phase 2: Traduction avec contexte
+            update_translation_progress(10, "🎬 Phase 2: Traduction par séquences en cours...")
+            
+            # Traduire les textes avec le traducteur intelligent
+            translated_count = self.intelligent_translator.batch_translate_sequences(
+                texts_to_translate,
+                progress_callback=lambda p, s: update_translation_progress(10 + (p * 0.85), f"🎬 {s}"),
+                should_stop=should_stop
+            )
+            
+            # Sauvegarder le cache intelligent
+            self.intelligent_translator.save_context_cache()
+            
+            # Mettre à jour l'interface principale
+            self.root.after(0, self.update_text_list)
+            self.root.after(0, self.update_stats)
+            
+            # Auto-sauvegarder si activé
+            if hasattr(self, 'auto_save_var') and self.auto_save_var.get():
+                self.root.after(0, self.save_current_texts)
+            
+        except Exception as e:
+            print(f"❌ Erreur durant la traduction intelligente: {e}")
+            error_message = str(e)
+            self.root.after(0, lambda: messagebox.showerror(
+                "Erreur de traduction", 
+                f"Erreur durant la traduction intelligente:\n{error_message}"
+            ))
+        
+        finally:
+            # Nettoyer et fermer
+            self.translating = False
+            self.stop_translation = False
+            
+            if hasattr(self, 'progress_window'):
+                self.root.after(0, self.progress_window.destroy)
+            
+            self.root.after(0, lambda: self.auto_translate_button.config(
+                state="normal", 
+                text="🧠 Traduction intelligente"
+            ))
+            
+            self.root.after(0, lambda: self.update_status_indicator("Traduction intelligente terminée", 'green'))
+            
+            # Message de fin
+            if should_stop():
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Traduction interrompue",
+                    f"⏹️ Traduction intelligente interrompue.\n"
+                    f"Textes traduits avant l'arrêt: {translated_count}"
+                ))
+            else:
+                # Obtenir les statistiques finales
+                stats = self.intelligent_translator.get_stats()
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Traduction intelligente terminée",
+                    f"✅ Traduction intelligente terminée!\n\n"
+                    f"📊 Textes traduits: {translated_count}\n"
+                    f"🧠 Personnages analysés: {stats.get('characters_found', 0)}\n"
+                    f"💾 Cache intelligent: {stats.get('cache_size', 0)} traductions\n\n"
+                    f"Le contexte global a été sauvegardé pour les prochaines sessions."
+                ))
+
     def translate_single_resource(self, text_entry: Dict):
-        """Traduit une ressource spécifique"""
-        if not OPENAI_AVAILABLE or not self.translator:
-            messagebox.showerror("Erreur", "Traducteur non disponible")
-            return
+        """Traduit une ressource spécifique - redirection vers traducteur intelligent"""
+        # Rediriger vers le traducteur intelligent
+        self.translate_single_resource_intelligent(text_entry)
+        return
         
         # Créer une fenêtre de progression simple
         progress_window = tk.Toplevel(self.root)
@@ -1503,6 +2201,92 @@ class UnityTextManagerGUI:
                 progress_window.destroy()
                 error_message = str(e)
                 messagebox.showerror("Erreur", f"Erreur lors de la traduction:\n{error_message}")
+        
+        # Lancer la traduction dans un thread
+        thread = threading.Thread(target=translate_worker)
+        thread.daemon = True
+        thread.start()
+
+    def translate_single_resource_intelligent(self, text_entry: Dict):
+        """Traduit une ressource spécifique avec le traducteur intelligent"""
+        if not INTELLIGENT_TRANSLATOR_AVAILABLE or not self.intelligent_translator:
+            messagebox.showerror("Erreur", "Traducteur intelligent non disponible")
+            return
+        
+        # Créer une fenêtre de progression simple
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("🧠 Traduction Intelligente")
+        progress_window.geometry("450x200")
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+        
+        progress_frame = ttk.Frame(progress_window, padding="20")
+        progress_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(
+            progress_frame,
+            text="🧠 Traduction intelligente en cours...",
+            font=('Arial', 11, 'bold')
+        ).pack(pady=(0, 10))
+        
+        ttk.Label(
+            progress_frame,
+            text="Analyse contextuelle et traduction cohérente",
+            font=('Arial', 9),
+            foreground='gray'
+        ).pack(pady=(0, 15))
+        
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            mode="indeterminate",
+            length=350
+        )
+        progress_bar.pack(fill=tk.X, pady=(0, 10))
+        progress_bar.start()
+        
+        status_label = ttk.Label(progress_frame, text="Initialisation...")
+        status_label.pack()
+        
+        def translate_worker():
+            try:
+                # Analyser le contexte si pas encore fait
+                if not self.intelligent_translator.context_analyzed:
+                    status_label.config(text="Analyse du contexte global...")
+                    self.intelligent_translator.analyze_global_context(self.current_texts['texts'])
+                
+                status_label.config(text="Traduction intelligente...")
+                original_text = text_entry.get('original_text', '')
+                file_context = f"{text_entry.get('asset_type', 'Unity')} - {text_entry.get('asset_name', 'Asset')}"
+                
+                translated_text = self.intelligent_translator.translate_with_context(
+                    original_text, 
+                    self.intelligent_translator.global_context,
+                    file_context
+                )
+                
+                status_label.config(text="Finalisation...")
+                
+                if translated_text != original_text:
+                    text_entry['translated_text'] = translated_text
+                    text_entry['is_translated'] = True
+                    
+                    # Sauvegarder le cache intelligent
+                    self.intelligent_translator.save_context_cache()
+                    
+                    # Mettre à jour l'interface
+                    self.root.after(100, self.update_text_list)
+                    self.root.after(100, self.update_stats)
+                    
+                    progress_window.after(500, progress_window.destroy)
+                    messagebox.showinfo("Succès", "✅ Texte traduit intelligemment avec succès!")
+                else:
+                    progress_window.destroy()
+                    messagebox.showinfo("Information", "ℹ️ Le texte semble déjà être en français")
+                    
+            except Exception as e:
+                progress_window.destroy()
+                error_message = str(e)
+                messagebox.showerror("Erreur", f"Erreur lors de la traduction intelligente:\n{error_message}")
         
         # Lancer la traduction dans un thread
         thread = threading.Thread(target=translate_worker)
@@ -1862,11 +2646,13 @@ def main():
         sys.exit(1)
     
     # Informer sur les dépendances optionnelles
-    if not OPENAI_AVAILABLE:
-        print("⚠️ OpenAI non disponible - Traduction automatique désactivée")
-        print("Pour activer: pip install openai langdetect")
-    else:
+    if INTELLIGENT_TRANSLATOR_AVAILABLE:
+        print("✅ Traduction intelligente activée")
+    elif OPENAI_AVAILABLE:
         print("✅ OpenAI disponible - Traduction automatique activée")
+    else:
+        print("⚠️ Traduction non disponible")
+        print("Pour activer: pip install openai langdetect")
     
     print("\n🚀 Lancement de l'interface graphique...")
     

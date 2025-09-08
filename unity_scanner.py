@@ -14,6 +14,16 @@ import json
 import zlib
 import lz4.frame
 
+# Importer le décodeur XOR
+try:
+    from xor_decoder import xor_decoder
+    XOR_DECODER_AVAILABLE = True
+    print("[INFO] Décodeur XOR disponible")
+except ImportError as e:
+    print(f"[WARN] Décodeur XOR non disponible: {e}")
+    XOR_DECODER_AVAILABLE = False
+    xor_decoder = None
+
 
 class UnityTextScanner:
     def __init__(self, game_path, progress_callback=None):
@@ -42,49 +52,106 @@ class UnityTextScanner:
         return any(indicator.exists() for indicator in il2cpp_indicators)
 
     def scan_directory(self):
-        """Scanne récursivement le dossier du jeu avec focus sur les bundles"""
+        """Scanne récursivement le dossier du jeu avec focus sur les bundles, ou traite un fichier unique"""
         unity_extensions = ['.assets', '.bundle', '.resource', '.resS', '.dat']
-        all_files = []
+        text_extensions = ['.srt', '.json', '.xml', '.txt']
+        obfuscated_files = []
         
-        # Séparer les bundles des autres fichiers
+        # Séparer les différents types de fichiers
         bundle_files = []
-        regular_files = []
+        unity_files = []
+        text_files = []
         
-        for root, dirs, files in os.walk(self.game_path):
-            root_path = Path(root)
-            is_streaming = 'StreamingAssets' in str(root_path)
-            
-            for file in files:
-                file_path = root_path / file
-                if file.lower().endswith('.bundle'):
-                    bundle_files.append(file_path)
-                elif (any(file.lower().endswith(ext) for ext in unity_extensions) or 
-                      file.lower().endswith(('.json', '.xml', '.txt'))):
-                    regular_files.append(file_path)
+        # Vérifier si le chemin est un fichier ou un dossier
+        if self.game_path.is_file():
+            print(f"[INFO] Mode fichier unique: {self.game_path.name}")
+            # Traiter un seul fichier
+            file_path = self.game_path
+            if file_path.suffix.lower() == '.bundle':
+                bundle_files.append(file_path)
+            elif any(file_path.suffix.lower() == ext for ext in unity_extensions):
+                unity_files.append(file_path)
+            elif any(file_path.suffix.lower() == ext for ext in text_extensions):
+                # Vérifier si le fichier texte est obfusqué
+                if XOR_DECODER_AVAILABLE and xor_decoder.is_likely_obfuscated(file_path):
+                    obfuscated_files.append(file_path)
+                    print(f"[XOR] Fichier potentiellement obfusqué détecté: {file_path.name}")
+                else:
+                    text_files.append(file_path)
+        else:
+            # Mode dossier - scanner récursivement
+            print(f"[INFO] Mode dossier: scan récursif de {self.game_path}")
+            for root, dirs, files in os.walk(self.game_path):
+                root_path = Path(root)
+                
+                for file in files:
+                    file_path = root_path / file
+                    if file.lower().endswith('.bundle'):
+                        bundle_files.append(file_path)
+                    elif any(file.lower().endswith(ext) for ext in unity_extensions):
+                        unity_files.append(file_path)
+                    elif any(file.lower().endswith(ext) for ext in text_extensions):
+                        # Vérifier si le fichier texte est obfusqué
+                        if XOR_DECODER_AVAILABLE and xor_decoder.is_likely_obfuscated(file_path):
+                            obfuscated_files.append(file_path)
+                            print(f"[XOR] Fichier potentiellement obfusqué détecté: {file_path.name}")
+                        else:
+                            text_files.append(file_path)
         
-        all_files = bundle_files + regular_files
+        all_files = bundle_files + unity_files + text_files
         total_files = len(all_files)
         
         print(f"[INFO] {len(bundle_files)} fichiers bundle trouvés")
-        print(f"[INFO] {len(regular_files)} autres fichiers Unity trouvés")
+        print(f"[INFO] {len(unity_files)} fichiers Unity trouvés")
+        print(f"[INFO] {len(text_files)} fichiers texte trouvés")
+        if obfuscated_files:
+            print(f"[INFO] {len(obfuscated_files)} fichiers potentiellement obfusqués détectés")
+        
+        # Traiter d'abord les fichiers obfusqués
+        if obfuscated_files:
+            print("\n[INFO] === TRAITEMENT DES FICHIERS OBFUSQUÉS ===")
+            for file_path in obfuscated_files:
+                if self.progress_callback:
+                    progress = len(self.found_texts) * 5  # Estimation approximative
+                    self.progress_callback(progress, f"Décodage XOR: {file_path.name}")
+                self.process_obfuscated_file(file_path)
         
         # Analyser d'abord quelques bundles en détail
         if bundle_files:
             print("\n[INFO] === ANALYSE DÉTAILLÉE DES BUNDLES ===")
             self.analyze_bundle_structure(bundle_files[:5])  # Analyser les 5 premiers
         
-        # Traiter tous les fichiers
-        for i, file_path in enumerate(all_files):
+        # Traiter tous les fichiers en utilisant les listes classées
+        files_processed = 0
+        
+        # Traiter les bundles
+        for i, file_path in enumerate(bundle_files):
             if self.progress_callback:
                 progress = (i + 1) / total_files * 100
-                self.progress_callback(progress, f"Analyse: {file_path.name}")
-            
-            if file_path.suffix.lower() == '.bundle':
-                self.process_bundle_file(file_path)
-            elif any(str(file_path).lower().endswith(ext) for ext in unity_extensions):
-                self.process_unity_file(file_path)
-            elif str(file_path).lower().endswith(('.json', '.xml', '.txt')):
-                self.process_text_file(file_path)
+                self.progress_callback(progress, f"Bundle: {file_path.name}")
+            print(f"[DEBUG] Traitement bundle: {file_path.name}")
+            self.process_bundle_file(file_path)
+            files_processed += 1
+        
+        # Traiter les fichiers Unity
+        for i, file_path in enumerate(unity_files):
+            if self.progress_callback:
+                progress = (len(bundle_files) + i + 1) / total_files * 100
+                self.progress_callback(progress, f"Unity: {file_path.name}")
+            print(f"[DEBUG] Traitement fichier Unity: {file_path.name} (extension: {file_path.suffix})")
+            self.process_unity_file(file_path)
+            files_processed += 1
+        
+        # Traiter les fichiers texte
+        for i, file_path in enumerate(text_files):
+            if self.progress_callback:
+                progress = (len(bundle_files) + len(unity_files) + i + 1) / total_files * 100
+                self.progress_callback(progress, f"Texte: {file_path.name}")
+            print(f"[DEBUG] Traitement fichier texte: {file_path.name}")
+            self.process_text_file(file_path)
+            files_processed += 1
+        
+        print(f"[DEBUG] Bilan traitement: {files_processed} fichiers traités ({len(bundle_files)} bundles, {len(unity_files)} Unity, {len(text_files)} textes)")
 
     def analyze_bundle_structure(self, bundle_files):
         """Analyse en profondeur la structure des bundles"""
@@ -440,6 +507,9 @@ class UnityTextScanner:
         extracted_texts = 0
         mono_success = 0
         mono_total = sum(1 for obj in objects if obj.type.name == "MonoBehaviour")
+        textasset_total = sum(1 for obj in objects if obj.type.name == "TextAsset")
+        
+        print(f"[DEBUG] -> Objets trouvés: {textasset_total} TextAssets, {mono_total} MonoBehaviours")
         
         for obj in objects:
             if obj.type.name == "TextAsset":
@@ -458,6 +528,9 @@ class UnityTextScanner:
         if mono_total > 0:
             success_rate = (mono_success / mono_total) * 100
             print(f"[DEBUG] -> MonoBehaviour: {mono_success}/{mono_total} lus avec succès ({success_rate:.1f}%)")
+        
+        if textasset_total > 0:
+            print(f"[DEBUG] -> TextAssets: {extracted_texts}/{textasset_total} extraits")
         
         if extracted_texts > 0:
             print(f"[DEBUG] -> {extracted_texts} textes extraits de ce fichier")
@@ -616,11 +689,15 @@ class UnityTextScanner:
         return True
 
     def is_potential_game_text(self, text):
-        """Détermine si un texte pourrait être du contenu de jeu"""
+        """Détermine si un texte pourrait être du contenu de jeu (version plus permissive)"""
         if not self.is_valid_text_candidate(text):
             return False
         
-        # Patterns spécifiques aux jeux (plus permissifs)
+        # Si le texte est assez long, on l'accepte plus facilement
+        if len(text) > 50:
+            return True
+            
+        # Patterns spécifiques aux jeux (très permissifs)
         game_patterns = [
             r'\b(you|your|player|character|game|level|score|points|health|mana|inventory)\b',
             r'\b(click|press|select|choose|option|menu|settings|save|load)\b',
@@ -628,6 +705,8 @@ class UnityTextScanner:
             r'[.!?]\s*$',
             r'^[A-Z].*[a-z]',
             r'\b(the|and|for|are|with|this|that|have|from|they|know|want|been|good|much|some|time|very|when|come|here|just|like|long|make|many|over|such|take|than|them|well|were)\b',  # Mots anglais courants
+            r'[a-zA-Z]+\s+[a-zA-Z]+',  # Au moins 2 mots
+            r'[\w\s]{15,}',  # Texte de longueur raisonnable
         ]
         
         return any(re.search(pattern, text, re.IGNORECASE) for pattern in game_patterns) or len(text) > 20
@@ -725,9 +804,16 @@ class UnityTextScanner:
             content_type = self.detect_content_type(data)
             
             if content and len(content) > 10:
-                if (self.is_text_relevant(name, content) or 
-                    self.is_potential_game_text(content)):
-                    
+                # DEBUG: Log pour analyser pourquoi les textes sont rejetés
+                name_relevant = self.is_text_relevant(name, content)
+                content_relevant = self.is_potential_game_text(content)
+                
+                print(f"[DEBUG] TextAsset '{name}' - Longueur: {len(content)}")
+                print(f"[DEBUG] -> Nom pertinent: {name_relevant}, Contenu pertinent: {content_relevant}")
+                preview = content[:100].replace('\n', '\\n')
+                print(f"[DEBUG] -> Aperçu: {preview}")
+                
+                if name_relevant or content_relevant:
                     text_info = {
                         'id': f"{source_file.stem}_{obj.path_id}",
                         'source_file': str(source_file),
@@ -742,8 +828,10 @@ class UnityTextScanner:
                         'data_properties': self.get_data_properties(data)
                     }
                     self.found_texts.append(text_info)
-                    print(f"  Texte trouvé: {name} (Type: {content_type})")
+                    print(f"  ✅ Texte accepté: {name} (Type: {content_type})")
                     return True
+                else:
+                    print(f"  ❌ Texte rejeté: {name} - Filtres non satisfaits")
         except Exception as e:
             print(f"  Erreur lors de l'extraction TextAsset: {e}")
         
@@ -868,14 +956,176 @@ class UnityTextScanner:
         except:
             pass
 
+    def process_obfuscated_file(self, file_path):
+        """Traite un fichier potentiellement obfusqué par XOR"""
+        if not XOR_DECODER_AVAILABLE:
+            print(f"[XOR] Décodeur non disponible pour {file_path.name}")
+            return
+        
+        print(f"[XOR] Analyse de {file_path.name}...")
+        
+        # Détecter la clé XOR
+        xor_key = xor_decoder.detect_xor_obfuscation(file_path)
+        
+        if xor_key is None:
+            print(f"[XOR] Aucune clé XOR détectée pour {file_path.name}")
+            # Essayer quand même de traiter comme fichier texte normal
+            self.process_text_file(file_path)
+            return
+        
+        # Décoder le fichier
+        decoded_data = xor_decoder.decode_file(file_path, xor_key)
+        if decoded_data is None:
+            print(f"[XOR] Échec du décodage de {file_path.name}")
+            return
+        
+        # Analyser le contenu décodé
+        content_info = xor_decoder.analyze_decoded_content(decoded_data, file_path)
+        if content_info is None:
+            print(f"[XOR] Impossible d'analyser le contenu décodé de {file_path.name}")
+            return
+        
+        text_content = content_info['text_content']
+        content_type = content_info['content_type']
+        
+        print(f"[XOR] ✅ Fichier décodé: {file_path.name} -> {content_type} ({content_info['lines']} lignes)")
+        
+        # Sauvegarder temporairement le fichier décodé pour debug
+        temp_file = xor_decoder.save_decoded_temp(file_path, decoded_data, xor_key)
+        if temp_file:
+            print(f"[XOR] Fichier décodé sauvé: {temp_file}")
+        
+        # Extraire les textes selon le type de contenu
+        if content_type == "srt":
+            self.extract_srt_texts(text_content, file_path, xor_key)
+        elif content_type == "json":
+            self.extract_json_texts(text_content, file_path, xor_key)
+        elif content_type in ["dialogue", "xml"]:
+            self.extract_dialogue_texts(text_content, file_path, xor_key)
+        else:
+            # Extraction générique
+            self.extract_generic_decoded_text(text_content, file_path, xor_key)
+
+    def extract_srt_texts(self, content, source_file, xor_key):
+        """Extrait le fichier SRT complet décodé (pas en parties séparées)"""
+        # Vérifier que c'est bien un contenu SRT valide
+        if '-->' in content and re.search(r'\d{2}:\d{2}:\d{2}', content):
+            # Créer un seul TextAsset avec tout le contenu SRT
+            text_info = {
+                'id': f"xor_srt_complete_{source_file.stem}",
+                'source_file': str(source_file),
+                'asset_name': f"{source_file.name} (Complete SRT)",
+                'asset_type': 'XOR_SRT_Complete',
+                'xor_key': f"0x{xor_key:02X}",
+                'original_text': content,
+                'translated_text': content,
+                'is_translated': False,
+                'extraction_date': datetime.now().isoformat(),
+                'extraction_method': f'xor_decryption_key_{xor_key}',
+                'content_length': len(content),
+                'subtitle_count': len(re.findall(r'\d+\s*\n\d{2}:\d{2}:\d{2}', content))
+            }
+            self.found_texts.append(text_info)
+            
+            subtitle_count = text_info['subtitle_count']
+            print(f"[XOR] Fichier SRT complet extrait: {source_file.name} ({subtitle_count} sous-titres, {len(content)} caractères)")
+        else:
+            print(f"[XOR] Contenu non reconnu comme SRT valide pour {source_file.name}")
+
+    def extract_json_texts(self, content, source_file, xor_key):
+        """Extrait le fichier JSON complet décodé"""
+        try:
+            # Vérifier que c'est du JSON valide
+            json.loads(content)
+            
+            # Créer un seul TextAsset avec tout le contenu JSON
+            text_info = {
+                'id': f"xor_json_complete_{source_file.stem}",
+                'source_file': str(source_file),
+                'asset_name': f"{source_file.name} (Complete JSON)",
+                'asset_type': 'XOR_JSON_Complete',
+                'xor_key': f"0x{xor_key:02X}",
+                'original_text': content,
+                'translated_text': content,
+                'is_translated': False,
+                'extraction_date': datetime.now().isoformat(),
+                'extraction_method': f'xor_decryption_key_{xor_key}',
+                'content_length': len(content)
+            }
+            self.found_texts.append(text_info)
+            print(f"[XOR] Fichier JSON complet extrait: {source_file.name} ({len(content)} caractères)")
+            
+        except json.JSONDecodeError:
+            print(f"[XOR] Erreur de parsing JSON pour {source_file.name}")
+            self.extract_generic_decoded_text(content, source_file, xor_key)
+
+    def extract_dialogue_texts(self, content, source_file, xor_key):
+        """Extrait le fichier de dialogue complet décodé"""
+        # Créer un seul TextAsset avec tout le contenu de dialogue
+        text_info = {
+            'id': f"xor_dialogue_complete_{source_file.stem}",
+            'source_file': str(source_file),
+            'asset_name': f"{source_file.name} (Complete Dialogue)",
+            'asset_type': 'XOR_Dialogue_Complete',
+            'xor_key': f"0x{xor_key:02X}",
+            'original_text': content,
+            'translated_text': content,
+            'is_translated': False,
+            'extraction_date': datetime.now().isoformat(),
+            'extraction_method': f'xor_decryption_key_{xor_key}',
+            'content_length': len(content),
+            'line_count': len(content.split('\n'))
+        }
+        self.found_texts.append(text_info)
+        
+        line_count = text_info['line_count']
+        print(f"[XOR] Fichier de dialogue complet extrait: {source_file.name} ({line_count} lignes, {len(content)} caractères)")
+
+    def extract_generic_decoded_text(self, content, source_file, xor_key):
+        """Extraction générique de texte décodé complet"""
+        # Créer un seul TextAsset avec tout le contenu
+        text_info = {
+            'id': f"xor_generic_complete_{source_file.stem}",
+            'source_file': str(source_file),
+            'asset_name': f"{source_file.name} (Complete Text)",
+            'asset_type': 'XOR_Generic_Complete',
+            'xor_key': f"0x{xor_key:02X}",
+            'original_text': content,
+            'translated_text': content,
+            'is_translated': False,
+            'extraction_date': datetime.now().isoformat(),
+            'extraction_method': f'xor_decryption_key_{xor_key}',
+            'content_length': len(content),
+            'line_count': len(content.split('\n'))
+        }
+        self.found_texts.append(text_info)
+        
+        line_count = text_info['line_count']
+        print(f"[XOR] Fichier texte complet extrait: {source_file.name} ({line_count} lignes, {len(content)} caractères)")
+
     def process_text_file(self, file_path):
         """Traite les fichiers texte"""
         try:
-            if self.is_text_relevant(file_path.name, ""):
+            # Les fichiers .srt sont automatiquement considérés comme pertinents
+            is_srt = file_path.suffix.lower() == '.srt'
+            name_relevant = self.is_text_relevant(file_path.name, "") if not is_srt else True
+            print(f"[DEBUG] Fichier texte: {file_path.name} - SRT: {is_srt}, Nom pertinent: {name_relevant}")
+            
+            if name_relevant:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                if len(content) > 10 and (self.contains_dialogue_pattern(content) or 
-                                         self.is_potential_game_text(content)):
+                
+                # DEBUG: Analyser le contenu
+                content_length = len(content)
+                has_dialogue = self.contains_dialogue_pattern(content) if content else False
+                is_game_text = self.is_potential_game_text(content) if content else False
+                
+                print(f"[DEBUG] -> Longueur: {content_length}, Dialogue: {has_dialogue}, GameText: {is_game_text}")
+                if content_length > 0:
+                    preview = content[:200].replace('\n', '\\n').replace('\r', '\\r')
+                    print(f"[DEBUG] -> Aperçu: {preview}")
+                
+                if len(content) > 10 and (has_dialogue or is_game_text):
                     text_info = {
                         'id': f"textfile_{file_path.stem}",
                         'source_file': str(file_path),
@@ -887,7 +1137,11 @@ class UnityTextScanner:
                         'extraction_date': datetime.now().isoformat()
                     }
                     self.found_texts.append(text_info)
-                    print(f"  Fichier texte trouvé: {file_path.name}")
+                    print(f"  ✅ Fichier texte trouvé: {file_path.name}")
+                else:
+                    print(f"  ❌ Fichier rejeté: {file_path.name} - Filtres non satisfaits")
+            else:
+                print(f"  ❌ Nom non pertinent: {file_path.name}")
         except Exception as e:
             print(f"Erreur lors de la lecture de {file_path}: {e}")
 
